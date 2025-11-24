@@ -1,5 +1,4 @@
-# One big lump: SpaceX-style EDA + queries + classification modeling
-# Paste into a Jupyter notebook cell and run.
+
 
 # === 0. Imports & settings ===
 import pandas as pd
