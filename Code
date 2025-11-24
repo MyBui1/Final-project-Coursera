@@ -1,0 +1,421 @@
+# One big lump: SpaceX-style EDA + queries + classification modeling
+# Paste into a Jupyter notebook cell and run.
+
+# === 0. Imports & settings ===
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+import requests
+from io import BytesIO
+from datetime import datetime
+import warnings
+warnings.filterwarnings('ignore')
+%matplotlib inline
+
+# === 1. Data ingestion: try remote CSVs first, then fallback to local uploaded file ===
+print("STEP 1: Loading data...")
+
+url_part2 = "https://cf-courses-data.s3.us.cloud-object-storage.appdomain.cloud/IBM-DS0321EN-SkillsNetwork/datasets/dataset_part_2.csv"
+url_part3 = "https://cf-courses-data.s3.us.cloud-object-storage.appdomain.cloud/IBM-DS0321EN-SkillsNetwork/datasets/dataset_part_3.csv"
+
+local_fallback = "/mnt/data/kc_house_data.csv"   # your uploaded file (provided in session history)
+
+df_loaded = None
+try:
+    print("Attempting to load dataset_part_2.csv and dataset_part_3.csv from remote URLs...")
+    df2 = pd.read_csv(url_part2)
+    df3 = pd.read_csv(url_part3)
+    df_loaded = pd.concat([df2, df3], ignore_index=True)
+    print("Loaded remote parts, shape:", df_loaded.shape)
+except Exception as e:
+    print("Remote load failed:", str(e))
+    print("Falling back to local file at:", local_fallback)
+    try:
+        df_loaded = pd.read_csv(local_fallback)
+        print("Loaded local file, shape:", df_loaded.shape)
+    except Exception as e2:
+        raise RuntimeError("Failed to load both remote and local files. Error: " + str(e2))
+
+df = df_loaded.copy()
+
+# Quick look
+print("\nPreview columns:")
+print(df.columns.tolist()[:50])
+print("\nPreview head:")
+display(df.head())
+
+# === 2. Column resolution helper (robust to variations) ===
+col_map = {
+    "flight": ["Flight Number", "FlightNumber", "flight_number", "Flight No", "Flight"],
+    "launch_site": ["Launch Site", "Launch_Site", "launch_site", "LaunchSite", "Launch Site Name"],
+    "payload": ["Payload Mass (kg)", "PayloadMass", "payload_mass__kg_", "payload_mass", "Payload"],
+    "orbit": ["Orbit", "orbit"],
+    "class": ["Class", "class", "Mission Outcome", "mission_success", "label"],
+    "booster": ["Booster Version", "BoosterVersion", "Booster Version Category", "Booster Version", "Booster_Version"],
+    "customer": ["Customer", "Customers", "customer"],
+    "date": ["Date", "date", "Launch Date", "launch_date_utc", "LaunchDate"],
+    "landing": ["Landing Outcome", "landing_outcome", "LandingStatus", "landing_result"]
+}
+
+def pick_col(df, candidates):
+    for c in candidates:
+        if c in df.columns:
+            return c
+    return None
+
+flight_col = pick_col(df, col_map["flight"])
+site_col   = pick_col(df, col_map["launch_site"])
+payload_col= pick_col(df, col_map["payload"])
+orbit_col  = pick_col(df, col_map["orbit"])
+class_col  = pick_col(df, col_map["class"])
+booster_col= pick_col(df, col_map["booster"])
+customer_col = pick_col(df, col_map["customer"])
+date_col = pick_col(df, col_map["date"])
+landing_col = pick_col(df, col_map["landing"])
+
+print("\nResolved columns:")
+print("flight:", flight_col)
+print("launch site:", site_col)
+print("payload:", payload_col)
+print("orbit:", orbit_col)
+print("class:", class_col)
+print("booster:", booster_col)
+print("customer:", customer_col)
+print("date:", date_col)
+print("landing:", landing_col)
+
+# If any critical column is missing, show df.columns and stop for manual fix
+critical = [flight_col, site_col, payload_col, orbit_col, class_col]
+if any(c is None for c in critical):
+    print("\nWARNING: Some critical columns could not be auto-resolved. Available columns:")
+    print(df.columns.tolist())
+    print("\nPlease update the col_map or rename columns. The script will continue and skip queries that require missing columns.\n")
+
+# === 3. Basic cleaning (dates, types, missing handling) ===
+# Convert date if present
+if date_col:
+    df[date_col] = pd.to_datetime(df[date_col], errors='coerce')
+
+# Numeric conversions
+if payload_col:
+    df[payload_col] = pd.to_numeric(df[payload_col], errors='coerce')
+
+# Fill numeric NaNs where sensible (median)
+for c in [flight_col, payload_col]:
+    if c and c in df.columns:
+        if df[c].isnull().any():
+            median_val = df[c].median()
+            df[c].fillna(median_val, inplace=True)
+            print(f"Filled NaNs in {c} with median {median_val}")
+
+# === 4. Data Collection & Web scraping documentation (key phrases + mini flowcharts printed) ===
+print("\nSTEP 4: Data Collection (SpaceX REST) - key phrases & flowchart")
+print("- REST endpoint: https://api.spacexdata.com/v3/launches (v3) or https://api.spacexdata.com/v4/launches (v4)")
+print("- Use requests.get(), pd.json_normalize(), save raw JSON for reproducibility")
+print("\nFlowchart: [define params] -> [REST call] -> [save JSON] -> [json_normalize] -> [clean] -> [save CSV]")
+
+print("\nSTEP 4b: Web scraping (key phrases & flowchart)")
+print("- Use requests + BeautifulSoup, respect robots.txt, use pd.read_html for tables")
+print("Flowchart: [target URL] -> [requests.get] -> [check robots.txt] -> [BeautifulSoup parse] -> [extract data] -> [clean/save]")
+
+# === 5. EDA plots: create requested visualizations ===
+print("\nSTEP 5: EDA plots (Flight Number vs Launch Site, Payload vs Launch Site, success rate by orbit, etc.)")
+
+plt.style.use('seaborn-darkgrid')
+
+# 5.1 Flight Number vs Launch Site (scatter/strip plot)
+if flight_col and site_col:
+    plt.figure(figsize=(12,5))
+    sns.stripplot(x=site_col, y=flight_col, data=df, jitter=True, alpha=0.7)
+    plt.title("Flight Number vs Launch Site")
+    plt.xlabel("Launch Site")
+    plt.ylabel("Flight Number")
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+    plt.show()
+else:
+    print("Skipping Flight Number vs Launch Site (missing columns).")
+
+# 5.2 Payload vs Launch Site (box + scatter)
+if payload_col and site_col:
+    plt.figure(figsize=(12,6))
+    sns.boxplot(x=site_col, y=payload_col, data=df)
+    sns.stripplot(x=site_col, y=payload_col, data=df, color='k', size=3, jitter=True, alpha=0.4)
+    plt.title("Payload Mass (kg) by Launch Site")
+    plt.xlabel("Launch Site")
+    plt.ylabel("Payload Mass (kg)")
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+    plt.show()
+else:
+    print("Skipping Payload vs Launch Site (missing columns).")
+
+# 5.3 Bar chart: success rate of each orbit type
+if orbit_col and class_col:
+    # Ensure class is numeric 0/1 if possible
+    try:
+        df[class_col] = pd.to_numeric(df[class_col], errors='coerce')
+    except:
+        pass
+    orbit_stats = df.groupby(orbit_col)[class_col].mean().reset_index().sort_values(by=class_col, ascending=False)
+    plt.figure(figsize=(12,5))
+    sns.barplot(data=orbit_stats, x=orbit_col, y=class_col)
+    plt.ylabel("Success rate (mean of class)")
+    plt.title("Success rate by Orbit Type")
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+    plt.show()
+else:
+    print("Skipping orbit success rate (missing columns).")
+
+# 5.4 Scatter: Flight number vs Orbit type (strip)
+if flight_col and orbit_col:
+    plt.figure(figsize=(12,5))
+    sns.stripplot(x=orbit_col, y=flight_col, data=df, jitter=True)
+    plt.title("Flight Number vs Orbit Type")
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+    plt.show()
+else:
+    print("Skipping Flight vs Orbit (missing columns).")
+
+# 5.5 Scatter: Payload vs Orbit type
+if payload_col and orbit_col:
+    plt.figure(figsize=(12,5))
+    sns.stripplot(x=orbit_col, y=payload_col, data=df, jitter=True)
+    plt.title("Payload vs Orbit Type")
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+    plt.show()
+else:
+    print("Skipping Payload vs Orbit (missing columns).")
+
+# 5.6 Yearly average success rate (line chart)
+if date_col and class_col:
+    df['year'] = df[date_col].dt.year
+    yearly = df.groupby('year')[class_col].mean().reset_index()
+    plt.figure(figsize=(12,5))
+    sns.lineplot(data=yearly, x='year', y=class_col, marker='o')
+    plt.title("Yearly average success rate")
+    plt.ylabel("Average success rate")
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+    plt.show()
+else:
+    print("Skipping yearly average success rate (missing date/class).")
+
+# === 6. Requested dataset queries and answers ===
+print("\nSTEP 6: Requested dataset queries")
+
+# Helper short functions
+def safe_print(title, value):
+    print("\n---", title, "---")
+    print(value)
+
+# 6.1 Unique launch sites
+if site_col:
+    unique_sites = df[site_col].dropna().unique().tolist()
+    safe_print("Unique launch sites", unique_sites)
+else:
+    safe_print("Unique launch sites", "Column not found")
+
+# 6.2 Find 5 records where launch sites begin with 'CCA'
+if site_col:
+    cca_mask = df[site_col].astype(str).str.startswith("CCA", na=False)
+    cca5 = df.loc[cca_mask].head(5)
+    safe_print("First 5 records where launch site begins with CCA", cca5[[site_col, flight_col, date_col]].head(5) if not cca5.empty else "No matching records")
+else:
+    safe_print("CCA records", "launch site column missing")
+
+# 6.3 Total payload carried by boosters from NASA
+if customer_col and payload_col:
+    nasa_mask = df[customer_col].astype(str).str.contains("NASA", na=False, case=False)
+    total_nasa_payload = df.loc[nasa_mask, payload_col].sum()
+    safe_print("Total payload (kg) carried for NASA", total_nasa_payload)
+else:
+    safe_print("Total NASA payload", "customer or payload column missing")
+
+# 6.4 Average payload mass carried by booster version F9 v1.1
+if booster_col and payload_col:
+    mask_f9 = df[booster_col].astype(str).str.contains("F9 v1.1", na=False)
+    avg_f9 = df.loc[mask_f9, payload_col].mean() if mask_f9.any() else None
+    safe_print("Average payload for booster F9 v1.1 (kg)", avg_f9 if avg_f9 is not None else "No matches")
+else:
+    safe_print("Avg payload F9 v1.1", "booster or payload column missing")
+
+# 6.5 Dates of the first successful landing outcome on ground pad
+if landing_col and date_col:
+    mask_ground_success = df[landing_col].astype(str).str.contains("ground", na=False, case=False) & df[landing_col].astype(str).str.contains("success", na=False, case=False)
+    if mask_ground_success.any():
+        first_ground_success = df.loc[mask_ground_success, date_col].min()
+        safe_print("First successful landing on ground pad date", first_ground_success)
+    else:
+        safe_print("First successful ground pad landing", "No matching records found")
+else:
+    safe_print("First successful ground pad landing", "landing or date column missing")
+
+# 6.6 Boosters which have successfully landed on drone ship and payload 4000-6000
+if landing_col and booster_col and payload_col:
+    mask_ds_success = df[landing_col].astype(str).str.contains("drone", na=False, case=False) & df[landing_col].astype(str).str.contains("success", na=False, case=False)
+    mask_payload_range = df[payload_col].between(4000, 6000)
+    boosters_ds = df.loc[mask_ds_success & mask_payload_range, booster_col].unique().tolist()
+    safe_print("Boosters with successful drone ship landings and payload between 4000 and 6000", boosters_ds if boosters_ds else "No matching boosters")
+else:
+    safe_print("Boosters ds & payload query", "required columns missing")
+
+# 6.7 Total number of successful and failure mission outcomes
+if class_col:
+    class_counts = df[class_col].value_counts(dropna=False)
+    safe_print("Mission outcome value counts", class_counts.to_dict())
+    # If 0/1 numeric style:
+    if set(class_counts.index).issuperset({0,1}):
+        safe_print("Successes and Failures", {"Success": class_counts.get(1,0), "Failure": class_counts.get(0,0)})
+else:
+    safe_print("Mission outcomes", "class column missing")
+
+# 6.8 Booters which have carried the maximum payload mass
+if booster_col and payload_col:
+    idx_max = df[payload_col].idxmax()
+    if pd.notna(idx_max):
+        safe_print("Booster(s) for maximum payload", df.loc[idx_max, booster_col])
+        safe_print("Max payload value", df.loc[idx_max, payload_col])
+    else:
+        safe_print("Max payload", "No data")
+else:
+    safe_print("Max payload booster", "required columns missing")
+
+# 6.9 List failed landing_outcomes in drone ship and booster versions and launch sites for year 2015
+if landing_col and date_col and booster_col and site_col:
+    mask_2015 = (df[date_col].dt.year == 2015)
+    mask_ds_fail = df[landing_col].astype(str).str.contains("drone", na=False, case=False) & df[landing_col].astype(str).str.contains("fail", na=False, case=False)
+    df_2015_ds_fail = df.loc[mask_2015 & mask_ds_fail, [date_col, landing_col, booster_col, site_col, payload_col]].copy()
+    if not df_2015_ds_fail.empty:
+        safe_print("Failed drone-ship landings in 2015 (date, outcome, booster, site, payload)", df_2015_ds_fail)
+    else:
+        safe_print("Failed drone-ship landings in 2015", "None found")
+else:
+    safe_print("Failed drone-ship landings 2015", "required columns missing or date parsing issue")
+
+# 6.10 Rank the count of landing outcomes between 2010-06-04 and 2017-03-20 descending
+if landing_col and date_col:
+    start = pd.to_datetime("2010-06-04")
+    end = pd.to_datetime("2017-03-20")
+    mask_range = (df[date_col] >= start) & (df[date_col] <= end)
+    ranking = df.loc[mask_range, landing_col].value_counts().sort_values(ascending=False)
+    safe_print("Landing outcome counts between 2010-06-04 and 2017-03-20 (desc)", ranking.to_dict())
+else:
+    safe_print("Landing outcome ranking", "landing or date column missing")
+
+# === 7. Predictive analysis: build, tune, evaluate classification model ===
+print("\nSTEP 7: Predictive analysis (classification). Building a model to predict 'class' where available.")
+
+# Check target presence
+if class_col is None:
+    print("No target class found - skipping model training.")
+else:
+    df_model = df.copy()
+    # Keep rows with non-null target
+    df_model = df_model.loc[df_model[class_col].notna()].copy()
+    # Build feature list - numeric payload, flight; categorical: orbit, launch_site, booster
+    feature_candidates = []
+    if payload_col: feature_candidates.append(payload_col)
+    if flight_col: feature_candidates.append(flight_col)
+    if orbit_col: feature_candidates.append(orbit_col)
+    if site_col: feature_candidates.append(site_col)
+    if booster_col: feature_candidates.append(booster_col)
+    # Ensure features exist in df
+    features = [f for f in feature_candidates if f and f in df_model.columns]
+    print("Features used:", features)
+
+    # Drop rows with any NaN in selected features (simple approach)
+    df_model = df_model.dropna(subset=features + [class_col])
+    X = df_model[features].copy()
+    y = df_model[class_col].astype(int).copy()
+
+    # Preprocessing & pipeline
+    from sklearn.model_selection import train_test_split, StratifiedKFold, GridSearchCV
+    from sklearn.pipeline import Pipeline
+    from sklearn.compose import ColumnTransformer
+    from sklearn.preprocessing import OneHotEncoder, StandardScaler
+    from sklearn.ensemble import RandomForestClassifier
+    from sklearn.metrics import classification_report, confusion_matrix, ConfusionMatrixDisplay, roc_auc_score
+
+    # Split
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, stratify=y, random_state=42)
+
+    # Column types
+    num_cols = [c for c in features if pd.api.types.is_numeric_dtype(X[c])]
+    cat_cols = [c for c in features if c not in num_cols]
+
+    preprocessor = ColumnTransformer([
+        ("num", StandardScaler(), num_cols),
+        ("cat", OneHotEncoder(handle_unknown="ignore", sparse=False), cat_cols)
+    ], remainder='drop')
+
+    pipeline = Pipeline([
+        ("pre", preprocessor),
+        ("clf", RandomForestClassifier(random_state=42))
+    ])
+
+    # Grid search params (small grid for speed)
+    param_grid = {
+        "clf__n_estimators": [50, 100],
+        "clf__max_depth": [5, 10, None],
+        "clf__min_samples_split": [2, 5]
+    }
+
+    cv = StratifiedKFold(n_splits=4, shuffle=True, random_state=42)
+    grid = GridSearchCV(pipeline, param_grid, cv=cv, scoring='f1', n_jobs=-1, verbose=1)
+    print("Starting GridSearchCV (this may take a while)...")
+    grid.fit(X_train, y_train)
+    print("Best params:", grid.best_params_)
+    best_model = grid.best_estimator_
+
+    # Evaluate
+    y_pred = best_model.predict(X_test)
+    print("\nClassification report (test set):")
+    print(classification_report(y_test, y_pred))
+    try:
+        proba = best_model.predict_proba(X_test)[:,1]
+        roc = roc_auc_score(y_test, proba)
+        print("ROC AUC (test):", roc)
+    except Exception as e:
+        print("ROC AUC couldn't be computed:", e)
+
+    # Confusion Matrix
+    cm = confusion_matrix(y_test, y_pred)
+    disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=best_model.classes_)
+    disp.plot(cmap=plt.cm.Blues)
+    plt.title("Confusion Matrix - Best Model")
+    plt.show()
+
+    # Explanation of confusion matrix
+    tn, fp, fn, tp = cm.ravel() if cm.size==4 else (None,)*4
+    print("\nConfusion matrix interpretation:")
+    print("TN (true negatives):", tn)
+    print("FP (false positives):", fp)
+    print("FN (false negatives):", fn)
+    print("TP (true positives):", tp)
+    print("Precision (success-predicted):", (tp/(tp+fp) if (tp+fp)>0 else "NA"))
+    print("Recall (sensitivity):", (tp/(tp+fn) if (tp+fn)>0 else "NA"))
+
+# === 8. Save outputs (optional) ===
+print("\nSTEP 8: Saving cleaned dataframe and best model (if built).")
+try:
+    df.to_csv("combined_clean.csv", index=False)
+    print("Saved combined_clean.csv")
+except Exception as e:
+    print("Could not save combined_clean.csv:", e)
+
+try:
+    import joblib
+    if 'best_model' in locals():
+        joblib.dump(best_model, "best_model.pkl")
+        print("Saved best_model.pkl")
+    else:
+        print("No best model to save.")
+except Exception as e:
+    print("joblib save failed:", e)
+
+print("\nAll done. Inspect outputs above and adapt column name mapping if required.")
